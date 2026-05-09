@@ -121,33 +121,34 @@ app.use((_req, res) => {
 
 app.use(errorHandler);
 
-// ─── Start ────────────────────────────────────────────────────────────────────
+// ─── Start (local dev only — Vercel imports the exported app instead) ─────────
 
-const server = app.listen(env.PORT, () => {
-  console.log(`\n🚀 SmartRetail AI API  →  http://localhost:${env.PORT}`);
-  console.log(`📦 Database           →  Neon PostgreSQL`);
-  console.log(`📊 Environment        →  ${env.NODE_ENV}`);
-  console.log(
-    `🔒 CORS               →  ${
-      env.NODE_ENV === 'development' ? 'any localhost:* (dev mode)' : allowedOrigins.join(', ')
-    }\n`
-  );
-});
-
-// Clear error message when port is already in use
-server.on('error', (err: NodeJS.ErrnoException) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(
-      `\n❌  Port ${env.PORT} is already in use.\n` +
-        `   Kill the process first:\n` +
-        `   PowerShell: Stop-Process -Id (Get-NetTCPConnection -LocalPort ${env.PORT}).OwningProcess -Force\n`
+if (!process.env.VERCEL) {
+  const server = app.listen(env.PORT, () => {
+    console.log(`\n🚀 SmartRetail AI API  →  http://localhost:${env.PORT}`);
+    console.log(`📦 Database           →  Neon PostgreSQL`);
+    console.log(`📊 Environment        →  ${env.NODE_ENV}`);
+    console.log(
+      `🔒 CORS               →  ${
+        env.NODE_ENV === 'development' ? 'any localhost:* (dev mode)' : allowedOrigins.join(', ')
+      }\n`
     );
-  } else {
-    console.error('Server error:', err);
-  }
-  process.exit(1);
-});
+  });
 
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(
+        `\n❌  Port ${env.PORT} is already in use.\n` +
+          `   Kill the process first:\n` +
+          `   PowerShell: Stop-Process -Id (Get-NetTCPConnection -LocalPort ${env.PORT}).OwningProcess -Force\n`
+      );
+    } else {
+      console.error('Server error:', err);
+    }
+    process.exit(1);
+  });
+
+  process.on('SIGTERM', () => server.close(() => process.exit(0)));
+}
 
 export default app;
