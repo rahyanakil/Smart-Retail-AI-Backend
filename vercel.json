@@ -1,6 +1,5 @@
 {
   "version": 2,
-  "installCommand": "npm install --ignore-scripts && npx --yes prisma generate",
   "functions": {
     "api/index.ts": {
       "maxDuration": 60
