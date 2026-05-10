@@ -105,3 +105,20 @@ export const getMe = asyncHandler(async (req: Request, res: Response) => {
   const user = await authService.getMe(req.user!.userId);
   res.status(200).json({ success: true, data: user });
 });
+
+const updateMeSchema = z.object({
+  name: z.string().min(2, 'Name must be at least 2 characters').max(100).trim().optional(),
+  currentPassword: z.string().min(1).optional(),
+  newPassword: z
+    .string()
+    .min(8, 'New password must be at least 8 characters')
+    .regex(/[A-Za-z]/, 'Password must contain at least one letter')
+    .regex(/[0-9]/, 'Password must contain at least one number')
+    .optional(),
+});
+
+export const updateMe = asyncHandler(async (req: Request, res: Response) => {
+  const body = parseZod(updateMeSchema, req.body);
+  const user = await authService.updateMe(req.user!.userId, body);
+  res.status(200).json({ success: true, data: user, message: 'Profile updated' });
+});

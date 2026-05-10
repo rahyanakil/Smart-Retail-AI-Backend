@@ -2,6 +2,8 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { prisma } from '../lib/prisma';
 import { env } from '../config/env';
 import { AppError } from '../middleware/error.middleware';
+import { geminiQueue } from '../lib/geminiQueue';
+import { keyRotator } from '../lib/keyRotator';
 import { Role } from '../types';
 
 // ── Output types ──────────────────────────────────────────────────────────────
@@ -75,43 +77,129 @@ export interface CustomerBehavior {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function getClient(): GoogleGenerativeAI {
-  if (!env.GEMINI_API_KEY) {
-    throw new AppError(
-      'Gemini API key not configured. Add GEMINI_API_KEY to backend/.env',
-      503
-    );
-  }
-  return new GoogleGenerativeAI(env.GEMINI_API_KEY);
+function makeClient(apiKey: string): GoogleGenerativeAI {
+  return new GoogleGenerativeAI(apiKey);
 }
 
-async function callGemini(prompt: string): Promise<string> {
-  const genAI = getClient();
-  const model = genAI.getGenerativeModel({
+function isQuotaError(message: string): boolean {
+  return message.includes('RESOURCE_EXHAUSTED') || message.includes('429');
+}
+
+async function executeWithKey(apiKey: string, prompt: string): Promise<string> {
+  const model = makeClient(apiKey).getGenerativeModel({
     model: env.GEMINI_MODEL,
     generationConfig: {
       responseMimeType: 'application/json',
       temperature: 0.2,
       topP: 0.8,
-      maxOutputTokens: 2048,
+      // 4096 prevents restock/behavior responses (many items) from being truncated mid-JSON
+      maxOutputTokens: 4096,
     },
   });
+  const result = await model.generateContent(prompt);
+  return result.response.text();
+}
 
+/**
+ * Robustly parses a JSON string from Gemini output.
+ *
+ * Gemini's responseMimeType:'application/json' doesn't guarantee valid JSON.
+ * Handles: markdown fences, trailing commas, JS comments, leading prose, truncation.
+ */
+function safeParseJson<T>(raw: string, context: string): T {
+  // 1. Strip markdown fences (single and double-pass to handle nested)
+  let text = raw
+    .replace(/^```(?:json)?\s*/im, '')
+    .replace(/\s*```\s*$/im, '')
+    .trim();
+
+  // 2. Extract the outermost JSON object or array — discard any prose wrapper
+  const objStart = text.indexOf('{');
+  const arrStart = text.indexOf('[');
+  let start = -1;
+  if (objStart !== -1 && (arrStart === -1 || objStart < arrStart)) start = objStart;
+  else if (arrStart !== -1) start = arrStart;
+
+  if (start > 0) text = text.slice(start);
+
+  // 3. Remove JavaScript-style line comments (// ...) and block comments (/* ... */)
+  text = text
+    .replace(/\/\/[^\n\r]*/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // 4. Remove trailing commas before } or ] (most common Gemini quirk)
+  text = text.replace(/,(\s*[}\]])/g, '$1');
+
+  // 5. Attempt parse — on failure, surface the raw snippet to aid debugging
   try {
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
-    // Gemini sometimes wraps JSON in markdown fences — strip them
-    return text.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Gemini API call failed';
-    if (message.includes('API_KEY_INVALID') || message.includes('INVALID_ARGUMENT')) {
-      throw new AppError('Invalid Gemini API key. Check GEMINI_API_KEY in backend/.env', 503);
-    }
-    if (message.includes('RESOURCE_EXHAUSTED') || message.includes('429')) {
-      throw new AppError('Gemini free-tier quota exceeded. Please try again later.', 429);
-    }
-    throw new AppError(`AI generation failed: ${message}`, 502);
+    return JSON.parse(text) as T;
+  } catch (err) {
+    const snippet = text.slice(0, 300).replace(/\n/g, '\\n');
+    throw new AppError(
+      `Gemini returned malformed JSON for ${context}. Snippet: ${snippet}`,
+      502
+    );
   }
+}
+
+async function callGemini(prompt: string): Promise<string> {
+  if (keyRotator.count() === 0) {
+    throw new AppError('Gemini API key not configured. Add GEMINI_API_KEY to backend/.env', 503);
+  }
+
+  // Serialize all Gemini calls through the queue (500 ms cooldown between calls).
+  // Within each queue slot, we get a key from the rotator. If that key is
+  // quota-exhausted, we immediately try the next key once before giving up.
+  return geminiQueue.run(async () => {
+    const primaryKey = keyRotator.next();
+
+    try {
+      return await executeWithKey(primaryKey, prompt);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+
+      if (message.includes('API_KEY_INVALID') || message.includes('INVALID_ARGUMENT')) {
+        throw new AppError('Invalid Gemini API key. Check your .env file.', 503);
+      }
+
+      if (isQuotaError(message)) {
+        // Try the next key if one is available
+        const fallbackKey = keyRotator.peek();
+        if (fallbackKey && fallbackKey !== primaryKey) {
+          keyRotator.next(); // advance cursor past this fallback
+          try {
+            return await executeWithKey(fallbackKey, prompt);
+          } catch (fallbackErr: unknown) {
+            const fbMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+            if (isQuotaError(fbMsg)) {
+              throw new AppError(
+                'All Gemini API keys have hit their quota. Results are cached — refresh in a minute.',
+                429
+              );
+            }
+            throw new AppError(`AI generation failed: ${fbMsg}`, 502);
+          }
+        }
+        throw new AppError(
+          'Gemini quota exceeded. Add a second API key (GEMINI_API_KEY_1) to double your limit.',
+          429
+        );
+      }
+
+      throw new AppError(`AI generation failed: ${message}`, 502);
+    }
+  });
+}
+
+export function getAiKeyStatus() {
+  const count = keyRotator.count();
+  return {
+    keysConfigured: count,
+    effectiveRpm: count * 15,
+    tip: count < 2
+      ? 'Add GEMINI_API_KEY_1 (and GEMINI_API_KEY_2) to double/triple your free-tier RPM'
+      : `${count} keys active — effective quota: ${count * 15} RPM`,
+  };
 }
 
 function storeFilter(role: Role, storeId?: string | null) {
@@ -233,7 +321,7 @@ Respond ONLY with valid JSON matching this exact schema:
 ${schema}`;
 
   const raw = await callGemini(prompt);
-  const parsed = JSON.parse(raw) as SalesForecast;
+  const parsed = safeParseJson<SalesForecast>(raw, 'sales forecast');
   return { ...parsed, generatedAt: new Date().toISOString() };
 }
 
@@ -371,7 +459,7 @@ Respond ONLY with valid JSON matching this exact schema:
 ${schema}`;
 
   const raw = await callGemini(prompt);
-  const parsed = JSON.parse(raw) as BusinessInsights;
+  const parsed = safeParseJson<BusinessInsights>(raw, 'business insights');
   return { ...parsed, generatedAt: new Date().toISOString() };
 }
 
@@ -464,7 +552,7 @@ Respond ONLY with valid JSON matching this exact schema:
 ${schema}`;
 
   const raw = await callGemini(prompt);
-  const parsed = JSON.parse(raw) as RestockRecommendations;
+  const parsed = safeParseJson<RestockRecommendations>(raw, 'restock recommendations');
   return { ...parsed, generatedAt: new Date().toISOString() };
 }
 
@@ -619,7 +707,7 @@ Respond ONLY with valid JSON matching this exact schema:
 ${schema}`;
 
   const raw = await callGemini(prompt);
-  const parsed = JSON.parse(raw) as CustomerBehavior;
+  const parsed = safeParseJson<CustomerBehavior>(raw, 'customer behavior');
   return { ...parsed, generatedAt: new Date().toISOString() };
 }
 
@@ -633,9 +721,12 @@ function formatHour(h: number): string {
 // ── Status check ──────────────────────────────────────────────────────────────
 
 export function getAiStatus() {
+  const keyCount = keyRotator.count();
   return {
-    configured: !!env.GEMINI_API_KEY,
+    configured: keyCount > 0,
     model: env.GEMINI_MODEL,
     provider: 'Google Gemini (free tier)',
+    keysConfigured: keyCount,
+    effectiveRpm: keyCount * 15,
   };
 }

@@ -2,9 +2,15 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import { analyticsService } from '../services/analytics.service';
 import { asyncHandler } from '../middleware/error.middleware';
+import { cache, TTL } from '../lib/cache';
 
 export const getDashboard = asyncHandler(async (req: Request, res: Response) => {
-  const data = await analyticsService.getDashboard(req.user!.role, req.user!.storeId);
+  const { role, storeId } = req.user!;
+  const key = `analytics:dashboard:${role}:${storeId ?? 'admin'}`;
+  const cached = cache.get(key);
+  if (cached) return res.status(200).json({ success: true, data: cached, cached: true });
+  const data = await analyticsService.getDashboard(role, storeId);
+  cache.set(key, data, TTL.ONE_MINUTE);
   res.status(200).json({ success: true, data });
 });
 

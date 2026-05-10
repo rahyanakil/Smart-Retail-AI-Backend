@@ -7,6 +7,7 @@ import {
   logout,
   logoutAll,
   getMe,
+  updateMe,
 } from '../controllers/auth.controller';
 import { authenticate } from '../middleware/auth.middleware';
 
@@ -50,6 +51,7 @@ router.post('/refresh', normalLimiter, refresh);
 
 // Authenticated
 router.get('/me', normalLimiter, authenticate, getMe);
+router.patch('/me', normalLimiter, authenticate, updateMe);
 router.post('/logout', normalLimiter, authenticate, logout);
 router.post('/logout-all', normalLimiter, authenticate, logoutAll);
 

@@ -113,6 +113,126 @@ export class ProductService {
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
+  // ── Public listing (no auth) ────────────────────────────────────────────────
+
+  async getPublicProducts(query: {
+    search?: string;
+    category?: string;
+    minPrice?: string;
+    maxPrice?: string;
+    sort?: string;
+    page?: string;
+    limit?: string;
+  }) {
+    const page = Math.max(1, parseInt(query.page ?? '1'));
+    const limit = Math.min(48, Math.max(1, parseInt(query.limit ?? '12')));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.ProductWhereInput = { isActive: true, stock: { gt: 0 } };
+
+    if (query.search) {
+      where.OR = [
+        { name: { contains: query.search, mode: 'insensitive' } },
+        { category: { contains: query.search, mode: 'insensitive' } },
+        { description: { contains: query.search, mode: 'insensitive' } },
+      ];
+    }
+
+    if (query.category && query.category !== 'all') {
+      where.category = { equals: query.category, mode: 'insensitive' };
+    }
+
+    if (query.minPrice || query.maxPrice) {
+      where.price = {
+        ...(query.minPrice ? { gte: parseFloat(query.minPrice) } : {}),
+        ...(query.maxPrice ? { lte: parseFloat(query.maxPrice) } : {}),
+      };
+    }
+
+    let orderBy: Prisma.ProductOrderByWithRelationInput = { createdAt: 'desc' };
+    if (query.sort === 'price_asc') orderBy = { price: 'asc' };
+    else if (query.sort === 'price_desc') orderBy = { price: 'desc' };
+    else if (query.sort === 'name_asc') orderBy = { name: 'asc' };
+
+    const [total, products] = await Promise.all([
+      prisma.product.count({ where }),
+      prisma.product.findMany({
+        where,
+        orderBy,
+        skip,
+        take: limit,
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          price: true,
+          stock: true,
+          category: true,
+          imageUrl: true,
+          sku: true,
+          store: { select: { id: true, name: true, address: true } },
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    // Unique categories for filter sidebar
+    const allCategories = await prisma.product.findMany({
+      where: { isActive: true },
+      select: { category: true },
+      distinct: ['category'],
+    });
+
+    return {
+      data: products,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      categories: allCategories.map((p) => p.category).filter(Boolean) as string[],
+    };
+  }
+
+  async getPublicProductById(id: string) {
+    const product = await prisma.product.findFirst({
+      where: { id, isActive: true },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        price: true,
+        stock: true,
+        category: true,
+        imageUrl: true,
+        sku: true,
+        store: { select: { id: true, name: true, address: true } },
+        createdAt: true,
+      },
+    });
+
+    if (!product) throw new AppError('Product not found', 404);
+
+    const related = await prisma.product.findMany({
+      where: {
+        isActive: true,
+        category: product.category ?? undefined,
+        id: { not: id },
+        stock: { gt: 0 },
+      },
+      take: 4,
+      select: {
+        id: true,
+        name: true,
+        price: true,
+        category: true,
+        imageUrl: true,
+        stock: true,
+      },
+    });
+
+    return { product, related };
+  }
+
   // ── Inventory stats ──────────────────────────────────────────────────────────
 
   async getStats(role: Role, storeId?: string | null) {

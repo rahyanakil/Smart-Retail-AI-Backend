@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const envSchema = z.object({
-  DATABASE_URL: z.string().default('file:./dev.db'),
+  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
 
   // Access token — short-lived (15m–1d)
   JWT_SECRET: z
@@ -28,18 +28,25 @@ const envSchema = z.object({
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(900000),
   RATE_LIMIT_MAX: z.coerce.number().default(100),
 
-  GEMINI_API_KEY: z.string().optional(),
-  GEMINI_MODEL: z.string().default('gemini-1.5-flash'),
+  // Gemini API keys — set at least one. Set all three to triple your effective RPM quota.
+  // Keys rotate round-robin; if one returns RESOURCE_EXHAUSTED, the next is tried automatically.
+  GEMINI_API_KEY:   z.string().optional(),  // original / single-key fallback
+  GEMINI_API_KEY_1: z.string().optional(),  // second project key
+  GEMINI_API_KEY_2: z.string().optional(),  // third project key
+
+  // gemini-2.0-flash: faster, same free quota, better quality than 1.5-flash
+  GEMINI_MODEL: z.string().default('gemini-2.0-flash'),
 });
 
 const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
-  console.error('❌ Invalid environment variables:\n');
+  console.error('\n❌ Invalid or missing environment variables:\n');
   const errors = parsed.error.flatten().fieldErrors;
   Object.entries(errors).forEach(([field, messages]) => {
     console.error(`  ${field}: ${messages?.join(', ')}`);
   });
+  console.error('\nCopy backend/.env.example to backend/.env and fill in the values.\n');
   process.exit(1);
 }
 

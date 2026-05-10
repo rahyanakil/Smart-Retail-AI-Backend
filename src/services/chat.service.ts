@@ -2,6 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { prisma } from '../lib/prisma';
 import { env } from '../config/env';
 import { AppError } from '../middleware/error.middleware';
+import { keyRotator } from '../lib/keyRotator';
 import { Role } from '../types';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -11,16 +12,17 @@ export interface ChatHistoryItem {
   content: string;
 }
 
-// ── Gemini client ─────────────────────────────────────────────────────────────
+// ── Gemini client (uses rotating keys) ───────────────────────────────────────
 
 function getGeminiClient(): GoogleGenerativeAI {
-  if (!env.GEMINI_API_KEY) {
+  if (keyRotator.count() === 0) {
     throw new AppError(
       'Gemini API key not configured. Add GEMINI_API_KEY to backend/.env',
       503
     );
   }
-  return new GoogleGenerativeAI(env.GEMINI_API_KEY);
+  // Chat uses the next key in rotation — same pool as batch AI calls
+  return new GoogleGenerativeAI(keyRotator.next());
 }
 
 // ── Context builder ───────────────────────────────────────────────────────────

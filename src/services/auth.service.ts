@@ -184,6 +184,42 @@ export class AuthService {
     if (!user.isActive) throw new AppError('Account is deactivated', 403);
     return user;
   }
+
+  async updateMe(
+    userId: string,
+    input: { name?: string; currentPassword?: string; newPassword?: string }
+  ) {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new AppError('User not found', 404);
+
+    const updates: { name?: string; password?: string } = {};
+
+    if (input.name) updates.name = input.name;
+
+    if (input.newPassword) {
+      if (!input.currentPassword) {
+        throw new AppError('Current password is required to set a new password', 400);
+      }
+      const valid = await bcrypt.compare(input.currentPassword, user.password);
+      if (!valid) throw new AppError('Current password is incorrect', 400);
+      updates.password = await bcrypt.hash(input.newPassword, BCRYPT_ROUNDS);
+    }
+
+    if (Object.keys(updates).length === 0) {
+      throw new AppError('No changes to save', 400);
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: updates,
+      select: {
+        id: true, email: true, name: true, role: true,
+        storeId: true, isActive: true, createdAt: true, updatedAt: true,
+        store: { select: { id: true, name: true, address: true } },
+      },
+    });
+    return updated;
+  }
 }
 
 export const authService = new AuthService();

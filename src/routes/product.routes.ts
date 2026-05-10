@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import {
+  getPublicProducts,
+  getPublicProductById,
   getProducts,
   getInventoryStats,
   getProductCategories,
@@ -14,6 +16,10 @@ import { authenticate } from '../middleware/auth.middleware';
 import { authorize } from '../middleware/role.middleware';
 
 const router = Router();
+
+// ── Public routes (no auth) ────────────────────────────────────────────────────
+router.get('/public', getPublicProducts);
+router.get('/public/:id', getPublicProductById);
 
 router.use(authenticate);
 

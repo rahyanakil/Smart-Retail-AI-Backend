@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import compression from 'compression';
+import { logger } from './lib/logger';
 import rateLimit from 'express-rate-limit';
 import { env } from './config/env';
 import { errorHandler } from './middleware/error.middleware';
@@ -51,7 +52,13 @@ app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-if (env.NODE_ENV === 'development') app.use(morgan('dev'));
+// HTTP request logging — pipe Morgan output through Winston
+app.use(
+  morgan('combined', {
+    stream: { write: (msg: string) => logger.http(msg.trim()) },
+    skip: (_req, res) => res.statusCode < 400 && process.env.NODE_ENV === 'production',
+  })
+);
 
 // ─── Global rate limit ────────────────────────────────────────────────────────
 
@@ -125,25 +132,18 @@ app.use(errorHandler);
 
 if (!process.env.VERCEL) {
   const server = app.listen(env.PORT, () => {
-    console.log(`\n🚀 SmartRetail AI API  →  http://localhost:${env.PORT}`);
-    console.log(`📦 Database           →  Neon PostgreSQL`);
-    console.log(`📊 Environment        →  ${env.NODE_ENV}`);
-    console.log(
-      `🔒 CORS               →  ${
-        env.NODE_ENV === 'development' ? 'any localhost:* (dev mode)' : allowedOrigins.join(', ')
-      }\n`
+    logger.info(`SmartRetail AI API → http://localhost:${env.PORT}`);
+    logger.info(`Environment: ${env.NODE_ENV} | DB: Neon PostgreSQL`);
+    logger.info(
+      `CORS: ${env.NODE_ENV === 'development' ? 'any localhost:* (dev mode)' : allowedOrigins.join(', ')}`
     );
   });
 
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
-      console.error(
-        `\n❌  Port ${env.PORT} is already in use.\n` +
-          `   Kill the process first:\n` +
-          `   PowerShell: Stop-Process -Id (Get-NetTCPConnection -LocalPort ${env.PORT}).OwningProcess -Force\n`
-      );
+      logger.error(`Port ${env.PORT} is already in use. Kill the process first.`);
     } else {
-      console.error('Server error:', err);
+      logger.error('Server error', { error: err.message });
     }
     process.exit(1);
   });

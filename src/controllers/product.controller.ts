@@ -34,6 +34,16 @@ const adjustStockSchema = z.object({
 
 // ─── Controllers ─────────────────────────────────────────────────────────────
 
+export const getPublicProducts = asyncHandler(async (req: Request, res: Response) => {
+  const result = await productService.getPublicProducts(req.query as any);
+  res.status(200).json({ success: true, data: result });
+});
+
+export const getPublicProductById = asyncHandler(async (req: Request, res: Response) => {
+  const result = await productService.getPublicProductById(req.params.id);
+  res.status(200).json({ success: true, data: result });
+});
+
 export const getProducts = asyncHandler(async (req: Request, res: Response) => {
   const result = await productService.getAll(req.query as any, req.user!.role, req.user!.storeId);
   res.status(200).json({ success: true, data: result });
