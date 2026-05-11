@@ -1,74 +1,88 @@
 # SmartRetail AI — Backend
 
-Express.js REST API with TypeScript, Prisma ORM, PostgreSQL (Neon), and Google Gemini AI.
+Express.js · TypeScript · Prisma ORM · PostgreSQL (Neon) · Google Gemini AI
 
-See the [root README](../README.md) for full project setup, prerequisites, and environment variables.
+REST API and AI layer powering the SmartRetail AI SaaS platform. Handles authentication, multi-tenant data access, atomic POS transactions, analytics aggregation, and AI-driven business insights via Gemini.
+
+---
+
+## What This API Enables
+
+Every feature in the UX journey maps to an API capability:
+
+| User action | API call |
+|---|---|
+| Owner checks morning dashboard | `GET /api/analytics/dashboard` |
+| Cashier completes a sale | `POST /api/sales` (atomic transaction) |
+| Owner adjusts stock after delivery | `PATCH /api/products/:id/stock` |
+| Owner asks the AI Copilot a question | `POST /api/chat/stream` (SSE) |
+| Owner views AI health score + forecast | `GET /api/ai/insights` + `/forecast` + `/restock` |
+| Admin creates a new store | `POST /api/stores` |
+| Owner adds a new cashier | `POST /api/users` |
 
 ---
 
 ## Quick Start
 
 ```bash
-# From the project root — runs both servers concurrently (recommended)
+# From the project root — runs both servers concurrently
 npm run dev
 
-# Or just the backend
+# Backend only
 npm run dev:backend
-# which is equivalent to:
+# equivalent to:
 cd backend && npm run dev
 ```
 
-The API listens on **http://localhost:4000** by default.
+API listens on **http://localhost:4000**.
 
 ---
 
-## Architecture
-
-### Request Flow
+## Request Flow
 
 Every request passes through this chain in order:
 
 ```
 HTTP Request
+  → CORS + Helmet + Rate Limiter
   → Express Router
   → Auth Middleware     (authenticate / optionalAuthenticate)
   → Role Middleware     (requireAdmin / requireOwnerOrAbove / etc.)
-  → Controller          (wrapped in asyncHandler)
+  → Controller          (asyncHandler wrapper)
   → Service             (business logic + Prisma queries)
   → Prisma Client
   → PostgreSQL (Neon)
 ```
 
-### Key Files
+---
 
-| File | Purpose |
-|---|---|
-| `src/config/env.ts` | Zod validates all env vars at startup. Always import `env` from here — never `process.env` directly |
-| `src/middleware/auth.middleware.ts` | `authenticate` verifies the Bearer JWT and attaches `req.user: JWTPayload`. `optionalAuthenticate` attaches it when present but doesn't block |
-| `src/middleware/role.middleware.ts` | `requireAdmin`, `requireOwnerOrAbove`, `requireSameStoreOrAdmin`, `requireSelfOrAdmin` — always compose after `authenticate` |
-| `src/middleware/error.middleware.ts` | `asyncHandler(fn)` wraps async controllers so rejections forward to Express's error handler. `AppError(message, statusCode)` is the typed error class |
-| `src/services/` | All business logic. Services receive `role` and `storeId` from the JWT and scope queries accordingly |
+## Multi-Tenant Data Isolation
 
-### Role-Scoped Data Access
-
-Every service method filters data based on the caller's role:
+Every service method receives `role` and `storeId` from the verified JWT payload and scopes every Prisma query accordingly:
 
 ```ts
 const storeFilter = role !== 'ADMIN' ? { storeId: storeId ?? undefined } : {};
-// Spread into every Prisma where clause:
 const results = await prisma.product.findMany({ where: { ...storeFilter, isActive: true } });
 ```
 
-`ADMIN` sees all stores. `OWNER` and `CASHIER` see only their own store.
+- **ADMIN** — sees all stores, all users, all data
+- **OWNER** — sees only their store's products, sales, users, and analytics
+- **CASHIER** — same store scope as Owner, but write access limited to sales
 
-### API Response Envelope
+This is enforced at the service layer, not just the route layer — a manipulated JWT with an upgraded role claim cannot access another store's data.
 
-All responses follow this shape:
+---
 
-```json
-{ "success": true, "data": { ... } }
-{ "success": false, "message": "Human-readable error" }
-```
+## Key Files
+
+| File | Purpose |
+|---|---|
+| `src/config/env.ts` | Zod validates all env vars at startup. Import `env` from here — never `process.env` directly |
+| `src/middleware/auth.middleware.ts` | Verifies Bearer JWT, attaches `req.user: JWTPayload` |
+| `src/middleware/role.middleware.ts` | `requireAdmin`, `requireOwnerOrAbove`, `requireSameStoreOrAdmin`, `requireSelfOrAdmin` |
+| `src/middleware/error.middleware.ts` | `asyncHandler` wraps async controllers. `AppError(message, statusCode)` is the typed error class |
+| `src/services/` | All business logic. Services never read `req` — they receive typed inputs |
+| `api/index.ts` | Vercel serverless entry point — re-exports `app` from `src/index.ts` |
 
 ---
 
@@ -78,152 +92,138 @@ All responses follow this shape:
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/register` | Create account, returns `{ user, accessToken, refreshToken }` |
-| `POST` | `/login` | Authenticate, returns `{ user, accessToken, refreshToken }` |
-| `POST` | `/refresh` | Exchange refresh token for a new pair (old token invalidated) |
-| `POST` | `/logout` | Invalidate the current refresh token |
-| `GET` | `/me` | Return the authenticated user's profile |
+| `POST` | `/register` | Create Cashier account → `{ user, accessToken, refreshToken }` |
+| `POST` | `/login` | Authenticate → `{ user, accessToken, refreshToken }` |
+| `POST` | `/refresh` | Rotate refresh token → new pair (old token invalidated) |
+| `POST` | `/logout` | Invalidate one refresh token |
+| `POST` | `/logout-all` | Revoke all sessions for the authenticated user |
+| `GET` | `/me` | Return authenticated user's profile |
+| `PATCH` | `/me` | Update name or password |
 
 ### Products — `/api/products`
 
 | Method | Endpoint | Role | Description |
 |---|---|---|---|
-| `GET` | `/` | Any | Paginated list. Query params: `search`, `category`, `status` (`in_stock`/`low_stock`/`out_of_stock`), `page`, `limit` |
-| `POST` | `/` | Owner+ | Create a product |
+| `GET` | `/` | Any | Paginated list. Params: `search`, `category`, `status`, `page`, `limit` |
+| `POST` | `/` | Owner+ | Create product |
+| `GET` | `/stats` | Any | Aggregate counts: total, in-stock, low-stock, out-of-stock |
 | `GET` | `/categories` | Any | Category names with product counts |
 | `GET` | `/:id` | Any | Single product detail |
-| `PUT` | `/:id` | Owner+ | Full update |
-| `PATCH` | `/:id/stock` | Owner+ | Adjust stock. Body: `{ type: 'ADD'|'REMOVE'|'SET', quantity, reason? }`. Writes a `StockLog` row |
+| `GET` | `/:id/stock-logs` | Owner+ | Full audit trail of manual stock adjustments |
+| `PUT` | `/:id` | Owner+ | Full product update |
+| `PATCH` | `/:id/stock` | Owner+ | Adjust stock. Body: `{ type: 'ADD'|'REMOVE'|'SET', quantity, reason? }` |
 | `DELETE` | `/:id` | Owner+ | Soft delete — sets `isActive = false` |
 
 ### Sales — `/api/sales`
 
 | Method | Endpoint | Role | Description |
 |---|---|---|---|
-| `GET` | `/` | Any | Paginated list. Query params: `startDate`, `endDate`, `status`, `cashierId`, `page`, `limit` |
-| `POST` | `/` | Any | Create sale. Atomic transaction: creates `Sale` + `SaleItem` rows, decrements product stock |
+| `GET` | `/` | Any | Paginated list. Params: `startDate`, `endDate`, `status`, `cashierId`, `page`, `limit` |
+| `POST` | `/` | Any | Create sale — atomic transaction creates `Sale` + `SaleItem` rows and decrements stock |
 | `GET` | `/:id` | Any | Sale detail with line items |
+| `GET` | `/:id/invoice` | Any | Invoice-formatted sale data |
 | `PATCH` | `/:id/status` | Owner+ | Cancel or refund — restores stock atomically |
-
-### Users — `/api/users`
-
-| Method | Endpoint | Role | Description |
-|---|---|---|---|
-| `GET` | `/` | Owner+ | List users (Owner sees only their store; Admin sees all) |
-| `POST` | `/` | Owner+ | Create user |
-| `GET` | `/:id` | Self or Admin | Get a user |
-| `PUT` | `/:id` | Self or Admin | Update a user |
-| `DELETE` | `/:id` | Admin only | Soft delete (`isActive = false`) |
 
 ### Analytics — `/api/analytics` (Owner+)
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/dashboard` | Summary stats: total revenue, sales count, top products, low-stock alerts |
+| `GET` | `/dashboard` | Summary KPIs: total revenue, sales count, top products, low-stock alerts |
 | `GET` | `/sales-chart?period=daily\|weekly\|monthly` | Revenue time-series for charts |
-| `GET` | `/top-products` | Best-selling products ranked by total revenue |
+| `GET` | `/top-products?limit=N` | Best-selling products ranked by revenue |
+
+### Users — `/api/users`
+
+| Method | Endpoint | Role | Description |
+|---|---|---|---|
+| `GET` | `/` | Owner+ | List users (Owner: own store only; Admin: all) |
+| `POST` | `/` | Owner+ | Create user with specified role |
+| `GET` | `/:id` | Self or Admin | Get user profile |
+| `PUT` | `/:id` | Self or Admin | Update user |
+| `DELETE` | `/:id` | Admin | Soft delete — sets `isActive = false` |
 
 ### Stores — `/api/stores`
 
 | Method | Endpoint | Role | Description |
 |---|---|---|---|
-| `GET` | `/` | Admin | All stores with user/product/sales counts |
-| `POST` | `/` | Admin | Create a store |
-| `PUT` | `/:id` | Admin | Update a store |
-| `DELETE` | `/:id` | Admin | Soft delete (`isActive = false`) |
+| `GET` | `/` | Admin | All stores with user/product/sale counts |
+| `POST` | `/` | Admin | Create store |
+| `PUT` | `/:id` | Admin | Update store |
+| `DELETE` | `/:id` | Admin | Soft delete |
 
-### AI Insights — `/api/ai` (Owner+, rate-limited: 8 req/min)
+### AI Insights — `/api/ai` (Owner+, 8 req/min)
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/forecast` | 30-day revenue forecast — low/expected/high bands, weekly breakdown |
+| `GET` | `/forecast` | 30-day revenue forecast — pessimistic/expected/optimistic bands, weekly breakdown |
 | `GET` | `/insights` | Business health score (0–100), label, opportunities list, risks list |
-| `GET` | `/restock` | Per-product restock recommendations with urgency level and estimated cost |
+| `GET` | `/restock` | Per-product urgency, reorder quantity, days remaining, estimated cost |
 | `GET` | `/behavior` | Customer behavior: peak hours, payment preferences, basket size trends |
 
-### AI Copilot — `/api/chat` (Any authenticated, rate-limited: 20 msg/min)
+### AI Copilot — `/api/chat` (Any auth, 20 msg/min)
 
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
-| `POST` | `/stream` | `{ message: string, history: [{role, content}] }` | SSE stream of Gemini tokens, grounded in live store data |
+| `POST` | `/stream` | `{ message, history }` | SSE stream of Gemini tokens, grounded in live store snapshot |
+
+---
+
+## AI Architecture
+
+### Batch Analysis (`src/services/ai.service.ts`)
+
+Each of the four AI endpoints follows the same pattern:
+
+1. Fetch live Prisma data (sales history, inventory levels, recent transactions)
+2. Build a context-rich prompt with that data embedded as structured text
+3. Call Gemini with `responseMimeType: 'application/json'`
+4. Parse and return a strongly-typed struct
+
+The Gemini model cannot hallucinate your store's numbers — the actual data is in the prompt.
+
+### Streaming Chat (`src/services/chat.service.ts`)
+
+`buildChatContext(role, storeId)` runs 6 parallel Prisma queries before every chat response:
+- Today's revenue vs. yesterday
+- Month-to-date vs. last month
+- Top 5 products by revenue
+- Inventory counts (total, low stock, out of stock)
+- Last 5 sales with items
+
+This snapshot is injected as the Gemini **system instruction** so every answer is grounded in real data. If the owner asks *"What should I order this week?"*, Gemini sees the actual stock levels and sales velocity — not hypothetical data.
+
+`streamCopilotResponse` is an async generator that yields tokens as Gemini produces them, which the controller forwards as SSE events.
+
+The chat controller is the **only one that doesn't use `asyncHandler`** — SSE requires a long-lived open connection that can't be wrapped in a try/catch promise. It validates input synchronously before opening the stream, then catches mid-stream errors and sends them as `event: error` SSE events before calling `res.end()`.
 
 ---
 
 ## Database Schema
 
-### Models Overview
+**`User`** — `role` (`ADMIN`/`OWNER`/`CASHIER`), optional `storeId` (null for Admins), `isActive` for soft delete.
 
-**`User`** — has `role` (`ADMIN`/`OWNER`/`CASHIER`), belongs to a `Store` (nullable for Admins), soft-deleted via `isActive`.
+**`Store`** — top-level multi-tenant unit. Each store is an isolated silo: its own products, sales, and users. Soft-deleted via `isActive`.
 
-**`Store`** — top-level multi-tenant unit. Each store has its own users, products, and sales. Soft-deleted via `isActive`.
+**`Product`** — belongs to a `Store`. Tracks `stock`, `lowStockAlert` threshold, `costPrice` for margin calculations, unique `sku`, optional `barcode` and `category`. Soft-deleted via `isActive`.
 
-**`Product`** — belongs to a `Store`. Tracks `stock`, `lowStockAlert` threshold, `costPrice` (for margin calculations), unique `sku`, optional `barcode` and `category`. Soft-deleted via `isActive`.
+**`Sale`** — belongs to a `Store` and cashier `User`. Auto-generated `receiptNumber`. Status flow: `PENDING` → `COMPLETED` → `CANCELLED`/`REFUNDED`.
 
-**`Sale`** — belongs to a `Store` and a cashier (`User`). Has a unique auto-generated `receiptNumber`. Status: `PENDING` → `COMPLETED` → `CANCELLED`/`REFUNDED`.
+**`SaleItem`** — line items on a `Sale`. Records `price` at time of sale — price changes after the fact don't alter historical revenue.
 
-**`SaleItem`** — line items on a `Sale`. Records `price` at time of sale, not the current product price.
+**`StockLog`** — audit trail for manual adjustments only (`ADD`/`REMOVE`/`SET`). Automated POS deductions are tracked through `Sale` + `SaleItem`, not StockLog.
 
-**`StockLog`** — audit trail for manual stock adjustments (`ADD`/`REMOVE`/`SET`) only. Automated POS deductions are tracked through `Sale` + `SaleItem` instead.
-
-**`RefreshToken`** — one row per active session. Cascade-deleted when the User is deleted. Invalidated on use (rotation).
+**`RefreshToken`** — one row per active session. Cascade-deleted when User is deleted. Invalidated on use (rotation prevents replay attacks).
 
 ### Database Commands
 
 ```bash
-# Push schema to the database (no migration file — fast for dev)
-npm run db:push
-
-# Create a tracked migration file (use before committing schema changes)
-npm run db:migrate
-
-# Drop all data, re-run migrations, and re-seed
-npm run db:reset
-
-# Open Prisma Studio in the browser
-npm run db:studio
-
-# Regenerate the Prisma client after schema changes
-npx prisma generate
+npm run db:push        # Push schema changes (dev — no migration file)
+npm run db:migrate     # Create a tracked migration file
+npm run db:reset       # Drop + migrate + re-seed
+npm run db:studio      # Open Prisma Studio in the browser
+npm run db:seed        # Seed demo data
+npx prisma generate    # Regenerate the Prisma client after schema changes
 ```
-
----
-
-## AI Subsystem
-
-### How Batch Analysis Works (`src/services/ai.service.ts`)
-
-Four standalone async functions. Each one:
-
-1. Fetches live data from Prisma (sales history, inventory levels, etc.)
-2. Builds a detailed prompt with that data embedded
-3. Calls Gemini with `responseMimeType: 'application/json'`
-4. Parses and returns a strongly-typed struct
-
-| Function | Returns |
-|---|---|
-| `forecastSales` | `SalesForecast` — 30-day projection with weekly breakdown and confidence bands |
-| `generateBusinessInsights` | `BusinessInsights` — health score, label, array of opportunities and risks |
-| `getRestockRecommendations` | `RestockRecommendations` — per-product urgency, reorder qty, estimated cost |
-| `analyzeCustomerBehavior` | `CustomerBehavior` — peak hours, payment preferences, basket size |
-
-### How Streaming Chat Works (`src/services/chat.service.ts`)
-
-**`buildChatContext(role, storeId)`** — runs 6 parallel Prisma queries to build a live store snapshot:
-- Today's revenue vs. yesterday
-- This month vs. last month
-- Top 5 products by revenue
-- Inventory: total products, low stock count, out of stock count
-- Last 5 sales
-
-This snapshot is injected as the Gemini **system instruction** so every answer is grounded in the user's actual data.
-
-**`streamCopilotResponse(message, history, role, storeId)`** — async generator that calls `chat.sendMessageStream()` and yields tokens as they arrive.
-
-The chat controller is the **only controller that does not use `asyncHandler`** — SSE requires a long-lived open connection. It validates input synchronously before starting the stream, then catches mid-stream errors and sends them as `event: error` SSE events before calling `res.end()`.
-
-### Adding a Gemini Key Error
-
-Both `ai.service.ts` and `chat.service.ts` have their own `getGeminiClient()` helper that throws `AppError('GEMINI_API_KEY is not configured', 503)` when the key is missing. They are intentionally duplicated — sharing state between the batch and streaming subsystems would create coupling that's harder to debug.
 
 ---
 
@@ -231,10 +231,28 @@ Both `ai.service.ts` and `chat.service.ts` have their own `getGeminiClient()` he
 
 | Measure | Implementation |
 |---|---|
-| Secure HTTP headers | `helmet` middleware |
-| CORS | Dev: allows all `localhost:*`. Prod: locked to `FRONTEND_URL` |
-| Password hashing | `bcryptjs` with 10 salt rounds |
-| JWT rotation | Each refresh call issues a new pair and invalidates the old token in the `RefreshToken` table |
-| Input validation | Zod schemas on every request body |
-| Rate limiting | `express-rate-limit` — 100 req/15 min global, 8 req/min on `/api/ai`, 20 msg/min on `/api/chat` |
-| SQL injection | Impossible — Prisma uses parameterized queries exclusively |
+| Secure HTTP headers | `helmet` |
+| CORS | Dev: `localhost:*`. Prod: `FRONTEND_URL` (supports comma-separated list and `*` wildcards) |
+| Password hashing | `bcryptjs`, 12 salt rounds |
+| JWT rotation | Refresh call issues a new pair, invalidates the old token in the DB |
+| Input validation | Zod schema on every request body |
+| Rate limiting | Global: 100 req/15 min. AI endpoints: 8 req/min. Chat: 20 msg/min |
+| SQL injection | Impossible — Prisma uses parameterized queries only |
+| Timing attack mitigation | Login always runs `bcrypt.compare` even on missing-user path (constant-time guard) |
+
+---
+
+## Environment Variables
+
+```env
+DATABASE_URL=           # Neon PostgreSQL connection string
+JWT_SECRET=             # Min 32 characters
+JWT_REFRESH_SECRET=     # Min 32 characters (defaults to JWT_SECRET + "_refresh")
+JWT_EXPIRES_IN=1d
+JWT_REFRESH_EXPIRES_IN=7d
+PORT=4000
+NODE_ENV=development
+FRONTEND_URL=http://localhost:3000
+GEMINI_API_KEY=         # From aistudio.google.com/app/apikey
+GEMINI_MODEL=gemini-2.0-flash
+```
