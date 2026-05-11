@@ -24,6 +24,16 @@ const app = express();
 
 const allowedOrigins = env.FRONTEND_URL.split(',').map((o) => o.trim());
 
+// Supports exact URLs and glob-style wildcards (e.g. https://smart-retail-ai*.vercel.app)
+const isOriginAllowed = (origin: string): boolean =>
+  allowedOrigins.some((pattern) => {
+    if (!pattern.includes('*')) return pattern === origin;
+    const regexStr = pattern
+      .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*/g, '[^/]+');
+    return new RegExp(`^${regexStr}$`).test(origin);
+  });
+
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -36,7 +46,7 @@ app.use(
         if (isLocal) return callback(null, true);
       }
 
-      if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (isOriginAllowed(origin)) return callback(null, true);
       callback(new Error(`CORS: origin "${origin}" is not allowed`));
     },
     credentials: true,
